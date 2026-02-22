@@ -136,18 +136,25 @@ def build_device_port_mapping(possible_ports):
     for port in possible_ports:
         log.i(f"Checking YKUSH port {port}...")
 
+        # Snapshot of devices before enabling this port
+        before = set(devices._device_by_sn.keys())
+
         subprocess.run(f'ykushcmd ykush3 -u {port}', shell=True)
         time.sleep(5.0)
 
-        devices.query(hub_reset=True)
+        # Use hub_reset=False to avoid disrupting the per-port scan
+        devices.query(hub_reset=False)
 
-        for device in devices._device_by_sn.values():
-            key = device.name.upper()
-            if key not in mapping:
-                mapping[key] = port
-                log.i(f"Detected device: {device.name} ({device._sn}) on port {port}")
+        # Only consider devices that newly appeared after enabling this port
+        for sn, device in devices._device_by_sn.items():
+            if sn not in before:
+                key = device.name.upper()
+                if key not in mapping:
+                    mapping[key] = port
+                    log.i(f"Detected device: {device.name} ({device._sn}) on port {port}")
 
         subprocess.run(f'ykushcmd ykush3 -d {port}', shell=True)
+        time.sleep(2.5)  # Wait for device to unregister before scanning next port
 
     return mapping
 
@@ -173,16 +180,10 @@ def enable_port_for_device(device, port):
         log.e(f"No port mapping found for device {device.upper()}")
 
 
-def run_tests_for_device(device, testname):
+def run_tests_for_device(device, testname, device_port_mapping):
     """
     Run tests for a specific device by enabling its port and executing the test command.
     """
-    
-    # Define which ports are connected to YKUSH (e.g., 1, 2, 3...)
-    possible_ports = [1, 2, 3]
-    device_port_mapping = build_device_port_mapping(possible_ports)
-    log.i("Device to port mapping:", device_port_mapping)
-    
     disable_all_ports()  # Disable all ports first
     
     port = device_port_mapping.get(device.upper())
@@ -218,13 +219,18 @@ def find_devices_run_tests():
 
         testname = regex if regex else None
 
+        # Build the device-to-port mapping once before iterating over devices
+        possible_ports = [1, 2, 3]
+        device_port_mapping = build_device_port_mapping(possible_ports)
+        log.i('Device to port mapping:', device_port_mapping)
+
         if device_set:
             # Loop through user-specified devices and run tests only on them
             devices_not_found = []
             for device in device_set:
                 if device.upper() in connected_devices:
                     log.i('Running tests on device:', device)
-                    run_tests_for_device(device, testname)
+                    run_tests_for_device(device, testname, device_port_mapping)
                 else:
                     log.e('Skipping test run on device:', device, ', -- NOT found')
                     devices_not_found.append(device)
@@ -233,7 +239,7 @@ def find_devices_run_tests():
             # Loop through all connected devices and run all tests
             for device in connected_devices:
                 log.i('Running tests on device:', device)
-                run_tests_for_device(device, testname)
+                run_tests_for_device(device, testname, device_port_mapping)
     finally:
         if devices.hub and devices.hub.is_connected():
             devices.hub.disable_ports()
