@@ -953,42 +953,40 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
     {
         const auto cols = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS));
         const auto rows = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS));
-        if (rows <= 0 || cols <= 0)
+        const auto cell_size_cm = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_CELL_SIZE));
+        const auto origin_x_mm = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_X));
+        const auto origin_y_mm = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y));
+
+        // Validate the device-reported geometry and convert units (see occupancy_grid_utils.h).
+        occupancy::Geometry geo;
+        switch (occupancy::computeGeometry(cols, rows, cell_size_cm, origin_x_mm, origin_y_mm, raw_size, geo))
         {
+        case occupancy::GeometryStatus::Ok:
+            break;
+        case occupancy::GeometryStatus::NonPositiveDims:
             RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
                                  "Occupancy frame reported %dx%d cells - dropped", rows, cols);
             return;
-        }
-        // rows, cols are positive but device-controlled: reject a product that would wrap
-        // size_t before it sizes the grid below.
-        if (static_cast<size_t>(rows) > SIZE_MAX / static_cast<size_t>(cols))
-        {
+        case occupancy::GeometryStatus::SizeOverflow:
             RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
                                  "Occupancy frame geometry %dx%d overflows size_t - dropped", rows, cols);
             return;
-        }
-        const size_t n = static_cast<size_t>(rows) * static_cast<size_t>(cols);
-        if (raw_size < n)
-        {
+        case occupancy::GeometryStatus::PayloadTooSmall:
             RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
                                  "Occupancy pure payload (%zu bytes) smaller than %dx%d grid - dropped",
                                  raw_size, rows, cols);
             return;
         }
 
-        const float cell_size = static_cast<float>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_CELL_SIZE)) / 100.0f;      // cm -> m
-        const double origin_x = static_cast<double>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_X)) / 1000.0; // mm -> m
-        const double origin_y = static_cast<double>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y)) / 1000.0; // mm -> m
-
         nav_msgs::msg::OccupancyGrid msg;
         msg.header.stamp = t;
         msg.header.frame_id = FRAME_ID(OCCUPANCY);
         msg.info.map_load_time = t;
-        msg.info.resolution = cell_size;
-        msg.info.width  = static_cast<uint32_t>(cols);   // columns = cells along +X (forward)
-        msg.info.height = static_cast<uint32_t>(rows);   // rows    = cells along +Y (left)
-        msg.info.origin.position.x = origin_x;
-        msg.info.origin.position.y = origin_y;
+        msg.info.resolution = geo.resolution_m;
+        msg.info.width  = geo.width;    // columns = cells along +X (forward)
+        msg.info.height = geo.height;   // rows    = cells along +Y (left)
+        msg.info.origin.position.x = geo.origin_x_m;
+        msg.info.origin.position.y = geo.origin_y_m;
         msg.info.origin.position.z = 0.0;
         msg.info.origin.orientation.w = 1.0;
 
@@ -997,7 +995,7 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
         certainty_msg.info = msg.info;
 
         // Cells are already in nav_msgs order - copy straight through (no axis flip).
-        occupancy::splitCells(reinterpret_cast<const int8_t*>(raw_data), n,
+        occupancy::splitCells(reinterpret_cast<const int8_t*>(raw_data), geo.n,
                               static_cast<int8_t>(_occupancy_occupied_threshold),
                               msg.data, certainty_msg.data);
 
