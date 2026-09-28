@@ -956,16 +956,16 @@ bool BaseRealSenseNode::tryPublishPurePayloadOccupancy(const rs2::frame& f,
         break;
     case occupancy::GeometryStatus::NonPositiveDims:
         RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
-                             "Occupancy frame reported %dx%d cells - dropped", rows, cols);
+                             "Occupancy frame reported %dx%d cells - dropped", cols, rows);
         return true;
     case occupancy::GeometryStatus::SizeOverflow:
         RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
-                             "Occupancy frame geometry %dx%d overflows size_t - dropped", rows, cols);
+                             "Occupancy frame geometry %dx%d overflows size_t - dropped", cols, rows);
         return true;
     case occupancy::GeometryStatus::PayloadTooSmall:
         RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
                              "Occupancy pure payload (%zu bytes) smaller than %dx%d grid - dropped",
-                             raw_size, rows, cols);
+                             raw_size, cols, rows);
         return true;
     case occupancy::GeometryStatus::NonPositiveCellSize:
         RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
