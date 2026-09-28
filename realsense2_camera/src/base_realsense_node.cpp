@@ -1001,6 +1001,22 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
         return;
     }
 
+    // Both the pure-payload path above and the legacy path below need the grid
+    // geometry from occupancy metadata. If the device/driver delivers no occupancy
+    // metadata at all - e.g. an unpatched uvcvideo on Linux that drops the vendor
+    // metadata blob - get_frame_metadata() below would throw on every frame. Emit a
+    // single error and drop the frame instead of throwing/spamming per frame.
+    if (!f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS) ||
+        !f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS))
+    {
+        RCLCPP_ERROR_THROTTLE(_logger, *_node.get_clock(), 5000,
+            "Occupancy frames carry no grid metadata (columns/rows), so occupancy cannot "
+            "be published. On Linux this usually means uvcvideo is not metadata-patched - "
+            "install librealsense2-dkms (or a metadata-capable kernel). Occupancy frames "
+            "will keep being dropped until metadata is available.");
+        return;
+    }
+
     // Per-frame trace, kept at DEBUG (off by default) but throttled so it does not
     // log every frame even when debug logging is enabled, matching the MAP1 path.
     RCLCPP_DEBUG_THROTTLE(_logger, *_node.get_clock(), 5000, "Publishing Occupancy Grid Frame (legacy path)");
