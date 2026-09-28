@@ -19,6 +19,22 @@ using realsense2_camera::occupancy::splitCells;
 using realsense2_camera::occupancy::computeGeometry;
 using realsense2_camera::occupancy::Geometry;
 using realsense2_camera::occupancy::GeometryStatus;
+using realsense2_camera::occupancy::crc32IsoHdlc;
+
+TEST(Crc32IsoHdlc, StandardCheckValue)
+{
+    // The standard CRC-32 check value for "123456789" (same as zlib crc32).
+    const char msg[] = "123456789";
+    EXPECT_EQ(0xCBF43926u, crc32IsoHdlc(msg, 9));
+}
+
+TEST(Crc32IsoHdlc, DetectsSingleByteCorruption)
+{
+    std::vector<int8_t> payload(320 * 256, -1);
+    const uint32_t good = crc32IsoHdlc(payload.data(), payload.size());
+    payload[1234] = 100;
+    EXPECT_NE(good, crc32IsoHdlc(payload.data(), payload.size()));
+}
 
 TEST(SplitCells, LadderWithDefaultThreshold)
 {

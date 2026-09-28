@@ -73,6 +73,25 @@ inline GeometryStatus computeGeometry(int cols, int rows, int cell_size_cm,
     return GeometryStatus::Ok;
 }
 
+// CRC-32/ISO-HDLC (poly 0xEDB88320, reflected, init/xorout 0xFFFFFFFF) - same result
+// as zlib crc32. This is what the FW reports in RS2_FRAME_METADATA_CRC for the
+// pure-payload occupancy frame, computed over the whole payload.
+inline uint32_t crc32IsoHdlc(const void* data, size_t size)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < size; ++i)
+    {
+        crc ^= p[i];
+        for (int k = 0; k < 8; ++k)
+        {
+            const uint32_t mask = static_cast<uint32_t>(-static_cast<int32_t>(crc & 1u));
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
 // MAP1 cell ladder -> the two published data arrays (see file docs in the PR).
 // Values in [1, occupied_threshold) publish as unknown on the binary grid:
 // evidence exists, so "free" would be false, but the bar for "occupied" is not

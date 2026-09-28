@@ -973,6 +973,22 @@ bool BaseRealSenseNode::tryPublishPurePayloadOccupancy(const rs2::frame& f,
         return true;
     }
 
+    // Payload integrity: the FW reports a CRC-32/ISO-HDLC over the whole payload in the
+    // metadata (the MAP1 header used to carry it). Verify it when present and drop a
+    // corrupted frame; skip the check when the metadata doesn't carry a CRC.
+    if (f.supports_frame_metadata(RS2_FRAME_METADATA_CRC))
+    {
+        const auto expected = static_cast<uint32_t>(f.get_frame_metadata(RS2_FRAME_METADATA_CRC));
+        const uint32_t actual = occupancy::crc32IsoHdlc(raw_data, raw_size);
+        if (actual != expected)
+        {
+            RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
+                                 "Occupancy payload CRC mismatch (got 0x%08x, expected 0x%08x) - dropped",
+                                 actual, expected);
+            return true;
+        }
+    }
+
     nav_msgs::msg::OccupancyGrid msg;
     msg.header.stamp = t;
     msg.header.frame_id = FRAME_ID(OCCUPANCY);
