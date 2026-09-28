@@ -78,6 +78,14 @@ TEST(ComputeGeometry, RejectsPayloadSmallerThanGrid)
     EXPECT_EQ(GeometryStatus::Ok, computeGeometry(320, 256, 5, 0, 0, 81920, geo));
 }
 
+TEST(ComputeGeometry, RejectsNonPositiveCellSize)
+{
+    Geometry geo;
+    // cell size <= 0 would publish resolution 0 - a malformed grid; drop instead.
+    EXPECT_EQ(GeometryStatus::NonPositiveCellSize, computeGeometry(320, 256, 0, 0, 0, 81920, geo));
+    EXPECT_EQ(GeometryStatus::NonPositiveCellSize, computeGeometry(320, 256, -5, 0, 0, 81920, geo));
+}
+
 TEST(ComputeGeometry, LeavesOutputUntouchedOnFailure)
 {
     Geometry geo;   // default-constructed: all zero

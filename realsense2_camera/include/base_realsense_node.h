@@ -273,6 +273,12 @@ namespace realsense2_camera
         void publishDynamicTransforms();
         void publishPointCloud(rs2::points f, const rclcpp::Time& t, const rs2::frameset& frameset);
         void publishOccupancyFrame(rs2::frame f, const rclcpp::Time& t);
+        // Publishes a pure-payload (RSDEV-14426) occupancy frame. Returns false when the
+        // frame lacks the pure-payload metadata set, so the caller can fall through to the
+        // metadata-missing guard and the legacy formats.
+        bool tryPublishPurePayloadOccupancy(const rs2::frame& f, const uint8_t* raw_data,
+                                            size_t raw_size, const rclcpp::Time& t,
+                                            bool occ_wanted, bool cert_wanted);
         void publishLabeledPointCloud(rs2::labeled_points lpc, const rclcpp::Time& t);
         bool shouldPublishCameraInfo(const stream_index_pair& sip);
         Extrinsics rsExtrinsicsToMsg(const rs2_extrinsics& extrinsics) const;

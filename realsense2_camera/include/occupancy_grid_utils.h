@@ -27,6 +27,7 @@ enum class GeometryStatus
     NonPositiveDims,   // rows or cols <= 0
     SizeOverflow,      // rows * cols would wrap size_t
     PayloadTooSmall,   // fewer payload bytes than rows * cols cells
+    NonPositiveCellSize,  // cell size <= 0 -> resolution 0, a malformed grid
 };
 
 // Validated geometry + unit-converted map fields for a pure-payload occupancy frame.
@@ -58,6 +59,10 @@ inline GeometryStatus computeGeometry(int cols, int rows, int cell_size_cm,
     const size_t n = static_cast<size_t>(rows) * static_cast<size_t>(cols);
     if (raw_size < n)
         return GeometryStatus::PayloadTooSmall;
+    // A zero/negative cell size would publish resolution 0, which nav_msgs consumers
+    // reject or misread - drop the frame rather than forward a malformed grid.
+    if (cell_size_cm <= 0)
+        return GeometryStatus::NonPositiveCellSize;
 
     out.width = static_cast<uint32_t>(cols);
     out.height = static_cast<uint32_t>(rows);
