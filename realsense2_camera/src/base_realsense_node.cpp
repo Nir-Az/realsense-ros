@@ -941,8 +941,15 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
     // FW leaves it unsupported). Cells arrive already in nav_msgs row-major order
     // (data[y*width + x], +X forward along columns, +Y left) - copied straight through,
     // no fw_row/fw_col flip, unlike the D585S byte-legacy path below.
+    // Require every metadata field this branch reads (columns/rows/cell-size as well as
+    // the origin): get_frame_metadata() throws when a field is unsupported, so a frame
+    // that advertises the origin but is missing any of the others must fall through to
+    // the metadata-missing guard below rather than throwing out of the frame callback.
     if (f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_X) &&
-        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y))
+        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y) &&
+        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS) &&
+        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS) &&
+        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_CELL_SIZE))
     {
         const auto cols = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS));
         const auto rows = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS));
@@ -1005,12 +1012,13 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
     // geometry from occupancy metadata. If the device/driver delivers no occupancy
     // metadata at all - e.g. an unpatched uvcvideo on Linux that drops the vendor
     // metadata blob - get_frame_metadata() below would throw on every frame. Emit a
-    // single error and drop the frame instead of throwing/spamming per frame.
+    // throttled error and drop the frame instead of throwing/spamming per frame.
     if (!f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS) ||
-        !f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS))
+        !f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS) ||
+        !f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_CELL_SIZE))
     {
         RCLCPP_ERROR_THROTTLE(_logger, *_node.get_clock(), 5000,
-            "Occupancy frames carry no grid metadata (columns/rows), so occupancy cannot "
+            "Occupancy frames carry no grid metadata (columns/rows/cell-size), so occupancy cannot "
             "be published. On Linux this usually means uvcvideo is not metadata-patched - "
             "install librealsense2-dkms (or a metadata-capable kernel). Occupancy frames "
             "will keep being dropped until metadata is available.");
