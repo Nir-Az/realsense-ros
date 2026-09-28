@@ -28,7 +28,6 @@
 #include "pointcloud_filter.h"
 #include "align_depth_filter.h"
 #include "occupancy_grid_utils.h"
-#include "occupancy_map1.h"
 
 using namespace realsense2_camera;
 
@@ -928,36 +927,77 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
     if (!occ_wanted && !cert_wanted)
         return;
 
-    // Self-describing MAP1 payloads (D5xx safety-streams FW, librealsense#15557)
-    // are discriminated purely by their own bytes (magic + data_type) - the SDK
-    // no longer exposes origin metadata/enums for this. A frame tagged MAP1 that
-    // fails to parse (bad CRC, truncated, bad geometry/version, ...) must never
-    // fall through to the legacy unpack below: those wire bytes are not a
-    // bit/byte grid and misinterpreting them would feed garbage into a costmap.
     auto* raw_data = static_cast<const uint8_t*>(f.get_data());
     const size_t raw_size = static_cast<size_t>(f.get_data_size());
     if (raw_data == nullptr)
     {
-        return;   // no payload to read - guards is_map1 and both legacy paths below
+        return;   // no payload to read - guards the pure-payload and legacy paths below
     }
-    if (map1::is_map1(raw_data, raw_size))
+
+    // Pure-payload occupancy (RSDEV-14426: FW >= 7.58.46375 + librealsense#15691).
+    // The wire frame is a bare signed-cell grid with NO header - the geometry and the
+    // signed grid origin travel in the UVC metadata ABI instead of a MAP1 sub-header.
+    // We discriminate this format by the origin metadata the new FW/SDK populate (older
+    // FW leaves it unsupported). Cells arrive already in nav_msgs row-major order
+    // (data[y*width + x], +X forward along columns, +Y left) - copied straight through,
+    // no fw_row/fw_col flip, unlike the D585S byte-legacy path below.
+    if (f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_X) &&
+        f.supports_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y))
     {
-        map1::occg_view view{};
-        const auto r = map1::parse_occg(raw_data, raw_size, &view);
-        if (r != map1::parse_result::ok)
+        const auto cols = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_COLUMNS));
+        const auto rows = static_cast<int>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ROWS));
+        if (rows <= 0 || cols <= 0)
         {
-            // Throttled (not _ONCE): a validation failure that begins mid-run must stay
-            // visible, but a persistently bad stream must not spam the log.
             RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
-                                 "MAP1 occupancy frame failed validation (parse_result=%d) - dropped",
-                                 static_cast<int>(r));
+                                 "Occupancy frame reported %dx%d cells - dropped", rows, cols);
             return;
         }
-        // MAP1 cells arrive already in nav_msgs row-major order (data[y*width+x], +X forward
-        // along width, +Y left), so publishOccupancyFromMap1 copies them straight through --
-        // unlike the legacy paths below, which relayout fw_row/fw_col. The self-describing
-        // wire format owns the axis convention; HW-validated on D555.
-        publishOccupancyFromMap1(view, t);
+        // rows, cols are positive but device-controlled: reject a product that would wrap
+        // size_t before it sizes the grid below.
+        if (static_cast<size_t>(rows) > SIZE_MAX / static_cast<size_t>(cols))
+        {
+            RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
+                                 "Occupancy frame geometry %dx%d overflows size_t - dropped", rows, cols);
+            return;
+        }
+        const size_t n = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+        if (raw_size < n)
+        {
+            RCLCPP_WARN_THROTTLE(_logger, *_node.get_clock(), 5000,
+                                 "Occupancy pure payload (%zu bytes) smaller than %dx%d grid - dropped",
+                                 raw_size, rows, cols);
+            return;
+        }
+
+        const float cell_size = static_cast<float>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_CELL_SIZE)) / 100.0f;      // cm -> m
+        const double origin_x = static_cast<double>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_X)) / 1000.0; // mm -> m
+        const double origin_y = static_cast<double>(f.get_frame_metadata(RS2_FRAME_METADATA_OCCUPANCY_GRID_ORIGIN_Y)) / 1000.0; // mm -> m
+
+        nav_msgs::msg::OccupancyGrid msg;
+        msg.header.stamp = t;
+        msg.header.frame_id = FRAME_ID(OCCUPANCY);
+        msg.info.map_load_time = t;
+        msg.info.resolution = cell_size;
+        msg.info.width  = static_cast<uint32_t>(cols);   // columns = cells along +X (forward)
+        msg.info.height = static_cast<uint32_t>(rows);   // rows    = cells along +Y (left)
+        msg.info.origin.position.x = origin_x;
+        msg.info.origin.position.y = origin_y;
+        msg.info.origin.position.z = 0.0;
+        msg.info.origin.orientation.w = 1.0;
+
+        nav_msgs::msg::OccupancyGrid certainty_msg;
+        certainty_msg.header = msg.header;
+        certainty_msg.info = msg.info;
+
+        // Cells are already in nav_msgs order - copy straight through (no axis flip).
+        occupancy::splitCells(reinterpret_cast<const int8_t*>(raw_data), n,
+                              static_cast<int8_t>(_occupancy_occupied_threshold),
+                              msg.data, certainty_msg.data);
+
+        if (occ_wanted)
+            _occupancy_publisher->publish(msg);
+        if (cert_wanted)
+            _occupancy_certainty_publisher->publish(certainty_msg);
         return;
     }
 
@@ -1090,40 +1130,6 @@ void BaseRealSenseNode::publishOccupancyFrame(rs2::frame f, const rclcpp::Time& 
 
     // occ_wanted was checked (and returned on) above - always true here.
     _occupancy_publisher->publish(msg);
-}
-
-void BaseRealSenseNode::publishOccupancyFromMap1(const map1::occg_view& view, const rclcpp::Time& t)
-{
-    RCLCPP_DEBUG_THROTTLE(_logger, *_node.get_clock(), 5000, "Publishing Occupancy Grid + Certainty (MAP1 path)");
-
-    const auto& h = view.header;
-
-    nav_msgs::msg::OccupancyGrid msg;
-    msg.header.stamp = t;
-    msg.header.frame_id = FRAME_ID(OCCUPANCY);
-    msg.info.map_load_time = t;
-    msg.info.resolution = static_cast<float>(h.resolution_mm) / 1000.0f;
-    msg.info.width  = h.width;
-    msg.info.height = h.height;
-    msg.info.origin.position.x = static_cast<double>(h.origin_x_mm) / 1000.0;
-    msg.info.origin.position.y = static_cast<double>(h.origin_y_mm) / 1000.0;
-    msg.info.origin.position.z = 0.0;
-    msg.info.origin.orientation.w = 1.0;
-
-    nav_msgs::msg::OccupancyGrid certainty_msg;
-    certainty_msg.header = msg.header;
-    certainty_msg.info = msg.info;
-
-    // FW cells are already in nav_msgs order (data[y*width + x], X forward,
-    // Y left) - no axis flipping, unlike the legacy bit-packed/byte-packed paths.
-    occupancy::splitCells(view.cells, h.cell_count,
-                          static_cast<int8_t>(_occupancy_occupied_threshold),
-                          msg.data, certainty_msg.data);
-
-    if (_occupancy_publisher && 0 != _occupancy_publisher->get_subscription_count())
-        _occupancy_publisher->publish(msg);
-    if (_occupancy_certainty_publisher && 0 != _occupancy_certainty_publisher->get_subscription_count())
-        _occupancy_certainty_publisher->publish(certainty_msg);
 }
 
 void BaseRealSenseNode::publishLabeledPointCloud(rs2::labeled_points lpc, const rclcpp::Time& t)
