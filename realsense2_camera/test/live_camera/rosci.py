@@ -38,6 +38,7 @@ regex = None
 handle = None
 test_ran = False
 device_set = list()
+failed_devices = list()   # devices whose test run failed or timed out; drives the exit code
 
 def usage():
     ourname = os.path.basename( sys.argv[0] )
@@ -92,6 +93,8 @@ def run_test(cmd, test=None, dev_name=None, stdout=None, append =False):
     except Exception as e:
             log.e("---Test Failed---")
             log.w( "Error Exception:\n ",e )
+            if dev_name not in failed_devices:
+                failed_devices.append( dev_name )
 
     finally:
         if handle:
@@ -238,4 +241,9 @@ if __name__ == '__main__':
 
     find_devices_run_tests()
 
+# Like LibCI's pytest stage: a non-zero exit tells the pipeline that tests failed,
+# including a device whose run timed out and so produced no JUnit XML.
+if failed_devices:
+    log.e( "Test failures on:", failed_devices )
+    sys.exit( 1 )
 sys.exit( 0 )
