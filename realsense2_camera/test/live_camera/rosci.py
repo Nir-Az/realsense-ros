@@ -53,53 +53,41 @@ def usage():
 
     sys.exit( 2 )
 
-def command(dev_name, test=None):
+def command(dev_name, test_file, junit_name, test=None):
     cmd =  ['pytest-3']
     cmd += ['-s']
     cmd += ['-m', ''.join(dev_name)]
     if test:
         cmd += ['-k', f'{test}']
-    cmd += [''.join(dir_live_tests)]
+    cmd += [test_file]
     cmd += ['--debug']
-    cmd += [f'--junit-xml={logdir}/{dev_name.upper()}_pytest.xml']
+    cmd += [f'--junit-xml={logdir}/{junit_name}']
     return cmd
 
-def run_test(cmd, test=None, dev_name=None, stdout=None, append =False):
-    handle = None
+def run_test(cmd, log_name, junit_name, dev_name):
+    """
+    Run one pytest invocation (one test file on one device). Exit code 5 (no tests
+    collected) is not a failure; anything else non-zero, or a timeout, is.
+    """
+    handle = open( os.path.join( logdir, log_name ), "w" )
     try:
-        if test:
-            stdout = stdout + os.sep + str(dev_name.upper()) + '_' + test + '.log'
-        else:
-            stdout = stdout + os.sep + str(dev_name.upper()) + '_' + 'full.log'
-        if stdout is None:
-            sys.stdout.flush()
-        elif stdout and stdout != subprocess.PIPE:
-            if append:
-                handle = open( stdout, "a" )
-                handle.write(
-                    "\n----------TEST-SEPARATOR----------\n\n" )
-                handle.flush()
-            else:
-                handle = open( stdout, "w" )
-
         result = subprocess.run( cmd,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                timeout=200,
-                check=True )
-        if not result.returncode:
-                log.i("---Test Passed---")
+                timeout=200 )
+        if result.returncode in (0, 5):
+            log.i("---Test Passed---")
+        else:
+            raise RuntimeError( f"pytest exited with status {result.returncode}" )
     except Exception as e:
             log.e("---Test Failed---")
             log.w( "Error Exception:\n ",e )
             if dev_name not in failed_devices:
                 failed_devices.append( dev_name )
-
     finally:
-        if handle:
-            handle.close()
-        junit_xml_parsing(f'{dev_name.upper()}_pytest.xml')
+        handle.close()
+        junit_xml_parsing( junit_name )
 
 def junit_xml_parsing(xml_file):
     '''
@@ -146,21 +134,45 @@ def build_device_port_mapping():
     return mapping
 
 
+def device_test_files(device, testname):
+    """
+    Test files under the live-camera folder that hold tests for the given device marker.
+    """
+    cmd = ['pytest-3', '--collect-only', '-q', '-m', device.lower(), dir_live_tests]
+    if testname:
+        cmd += ['-k', testname]
+    out = subprocess.run( cmd, capture_output=True, universal_newlines=True, timeout=120 ).stdout
+    files = sorted( { line.split('::')[0] for line in out.splitlines() if '::' in line } )
+    return [ f if os.path.isabs(f) else os.path.join( os.getcwd(), f ) for f in files ]
+
+
 def run_tests_for_device(device, port, testname):
     """
-    Enable only the target device's YKUSH port (through rspy's hub) and run its
-    tests. rspy owns the hub, so there are no direct ykushcmd calls.
+    Run the device's tests one test file at a time, each on a freshly powered camera --
+    like LibCI, which power-cycles the device (rspy enable_only(recycle=True)) per test
+    file -- so a file never inherits the state (e.g. D585S safety mode) the previous one
+    left behind. rspy owns the hub, so there are no direct ykushcmd calls.
     """
     from rspy import devices
     if port is None:
         log.e(f"No port mapping found for device {device.upper()}")
         return
 
-    if devices.hub:
-        devices.hub.enable_ports([port], disable_other_ports=True, sleep_on_change=5)
+    serials = [ sn for sn, d in devices._device_by_sn.items() if d.name.upper() == device.upper() ]
+    test_files = device_test_files( device, testname )
+    if not test_files:
+        log.w( f"No tests found for {device}" )
+        return
 
-    cmd = command(device.lower(), testname)
-    run_test(cmd, testname, device, stdout=logdir, append=False)
+    for test_file in test_files:
+        stem = os.path.splitext( os.path.basename( test_file ) )[0]
+        log.i( f"Running {stem} on {device} (fresh power cycle)" )
+        if devices.hub and serials:
+            devices.enable_only( serials, recycle=True, disable_other_ports=True )
+            time.sleep( 5 )   # let the FW settle after enumeration before the node talks to it
+        junit_name = f'{device.upper()}_{stem}_pytest.xml'
+        cmd = command( device.lower(), test_file, junit_name, testname )
+        run_test( cmd, f'{device.upper()}_{stem}.log', junit_name, device )
 
 
 def find_devices_run_tests():
