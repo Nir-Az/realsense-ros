@@ -143,7 +143,12 @@ def device_test_files(device, testname):
     cmd = ['pytest-3', '--collect-only', '-q', '-m', device.lower(), dir_live_tests]
     if testname:
         cmd += ['-k', testname]
-    out = subprocess.run( cmd, capture_output=True, universal_newlines=True, timeout=120 ).stdout   # may raise TimeoutExpired
+    result = subprocess.run( cmd, capture_output=True, universal_newlines=True, timeout=120 )   # may raise TimeoutExpired
+    # 0 = collected, 5 = nothing collected for this device; anything else (import/syntax errors,
+    # bad markers, ...) is a real collection failure and must not look like "no tests".
+    if result.returncode not in (0, 5):
+        raise RuntimeError( f"test collection exited with status {result.returncode}:\n{result.stdout[-2000:]}{result.stderr[-2000:]}" )
+    out = result.stdout
     files = sorted( { line.split('::')[0] for line in out.splitlines() if '::' in line } )
     return [ f if os.path.isabs(f) else os.path.join( os.getcwd(), f ) for f in files ]
 
