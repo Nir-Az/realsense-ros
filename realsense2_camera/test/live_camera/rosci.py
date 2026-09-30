@@ -69,8 +69,9 @@ def run_test(cmd, log_name, junit_name, dev_name):
     Run one pytest invocation (one test file on one device). Exit code 5 (no tests
     collected) is not a failure; anything else non-zero, or a timeout, is.
     """
-    handle = open( os.path.join( logdir, log_name ), "w" )
+    handle = None
     try:
+        handle = open( os.path.join( logdir, log_name ), "w" )
         result = subprocess.run( cmd,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
@@ -86,7 +87,8 @@ def run_test(cmd, log_name, junit_name, dev_name):
             if dev_name not in failed_devices:
                 failed_devices.append( dev_name )
     finally:
-        handle.close()
+        if handle:
+            handle.close()
         junit_xml_parsing( junit_name )
 
 def junit_xml_parsing(xml_file):
@@ -141,7 +143,7 @@ def device_test_files(device, testname):
     cmd = ['pytest-3', '--collect-only', '-q', '-m', device.lower(), dir_live_tests]
     if testname:
         cmd += ['-k', testname]
-    out = subprocess.run( cmd, capture_output=True, universal_newlines=True, timeout=120 ).stdout
+    out = subprocess.run( cmd, capture_output=True, universal_newlines=True, timeout=120 ).stdout   # may raise TimeoutExpired
     files = sorted( { line.split('::')[0] for line in out.splitlines() if '::' in line } )
     return [ f if os.path.isabs(f) else os.path.join( os.getcwd(), f ) for f in files ]
 
@@ -158,8 +160,20 @@ def run_tests_for_device(device, port, testname):
         log.e(f"No port mapping found for device {device.upper()}")
         return
 
-    serials = [ sn for sn, d in devices._device_by_sn.items() if d.name.upper() == device.upper() ]
-    test_files = device_test_files( device, testname )
+    def fail( msg ):
+        log.e( msg )
+        if device not in failed_devices:
+            failed_devices.append( device )
+
+    serials = [ sn for sn in devices.all() if devices.get( sn ).name.upper() == device.upper() ]
+    if devices.hub and not serials:
+        fail( f"No serial number found for {device}; cannot power-cycle it between test files" )
+        return
+    try:
+        test_files = device_test_files( device, testname )
+    except Exception as e:
+        fail( f"Collecting tests for {device} failed: {e}" )
+        return
     if not test_files:
         log.w( f"No tests found for {device}" )
         return
